@@ -9,12 +9,108 @@ use lopdf::{Document as PdfDocument, Object, ObjectId};
 use std::collections::BTreeMap;
 use typst::{eval::Tracer, foundations::Smart};
 
+/// Attempts to decode PDF text bytes using multiple fallback strategies
+fn decode_pdf_text_robust(encoding: Option<&str>, bytes: &[u8]) -> String {
+    // First try the standard PDF decoding
+    let decoded_text = PdfDocument::decode_text(encoding, bytes);
+
+    // Check if the decoding failed or returned an error message
+    if decoded_text.contains("Unimplemented") ||
+       decoded_text.contains("Identity-H") ||
+       decoded_text.trim().is_empty() {
+
+        debug!("Standard PDF decoding failed for encoding: {:?}, trying fallbacks", encoding);
+
+        // Try UTF-8 decoding
+        if let Ok(utf8_text) = String::from_utf8(bytes.to_vec()) {
+            if utf8_text.chars().any(|c| c.is_alphanumeric() || c.is_whitespace()) {
+                debug!("Successfully decoded as UTF-8");
+                return utf8_text;
+            }
+        }
+
+        // Try UTF-16 decoding (common in PDFs)
+        if bytes.len() >= 2 && bytes.len() % 2 == 0 {
+            let utf16_bytes: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+                .collect();
+
+            if let Ok(utf16_text) = String::from_utf16(&utf16_bytes) {
+                if utf16_text.chars().any(|c| c.is_alphanumeric() || c.is_whitespace()) {
+                    debug!("Successfully decoded as UTF-16 BE");
+                    return utf16_text;
+                }
+            }
+
+            // Try UTF-16 LE
+            let utf16_le_bytes: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect();
+
+            if let Ok(utf16_le_text) = String::from_utf16(&utf16_le_bytes) {
+                if utf16_le_text.chars().any(|c| c.is_alphanumeric() || c.is_whitespace()) {
+                    debug!("Successfully decoded as UTF-16 LE");
+                    return utf16_le_text;
+                }
+            }
+        }
+
+        // Try Latin-1 (ISO-8859-1) as final fallback
+        let latin1_text: String = bytes.iter().map(|&b| b as char).collect();
+        if latin1_text.chars().any(|c| c.is_alphanumeric() || c.is_whitespace()) {
+            debug!("Using Latin-1 fallback decoding");
+            return latin1_text;
+        }
+
+        // If all else fails, return empty string instead of error message
+        debug!("All text decoding attempts failed, returning empty string");
+        return String::new();
+    }
+
+    decoded_text
+}
+
 pub struct Transformer;
 impl TransformerTrait for Transformer {
     fn parse(document: &Bytes) -> anyhow::Result<Document> {
         let mut elements: Vec<Element> = Vec::new();
         let pdf_document = PdfDocument::load_mem(document)?;
+        use crate::core::{ImageData, ImageDimension};
         for (_id, page_id) in pdf_document.get_pages() {
+            // Extract images from page resources
+            let (resources_opt, _) = pdf_document.get_page_resources(page_id);
+            if let Some(resources) = resources_opt {
+                if let Ok(xobjects) = resources.get(b"XObject") {
+                    if let Ok(xobj_dict) = xobjects.as_dict() {
+                        for (name, xobj_ref) in xobj_dict.iter() {
+                            if let Ok(xobj_id) = xobj_ref.as_reference() {
+                                if let Ok(xobj) = pdf_document.get_object(xobj_id) {
+                                    if let Ok(dict) = xobj.as_dict() {
+                                        if let Ok(subtype) = dict.get(b"Subtype") {
+                                            if subtype.as_name_str()? == "Image" {
+                                                if let Ok(stream) = xobj.as_stream() {
+                                                    let image_bytes = Bytes::from(stream.content.clone());
+                                                    let image_data = ImageData::new(
+                                                        image_bytes,
+                                                        format!("PDF Image {}", String::from_utf8_lossy(name)),
+                                                        "PDF Image".to_string(),
+                                                        "png".to_string(), // Assume PNG for now
+                                                        "center".to_string(),
+                                                        ImageDimension::default(),
+                                                    );
+                                                    elements.push(Element::Image(image_data));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             let objects = pdf_document.get_page_contents(page_id);
             for object_id in objects {
                 let object = pdf_document.get_object(object_id)?;
@@ -63,7 +159,7 @@ fn parse_object(
             debug!("2 {:?}", operand);
             match *operand {
                 Object::String(ref bytes, _) => {
-                    let decoded_text = PdfDocument::decode_text(encoding, bytes);
+                    let decoded_text = decode_pdf_text_robust(encoding, bytes);
                     text.push_str(&decoded_text);
                     if bytes.len() == 1 && bytes[0] == 1 {
                         match elements.last() {
@@ -158,7 +254,11 @@ fn parse_object(
     let fonts = pdf_document.get_page_fonts(page_id);
     let encodings = fonts
         .into_iter()
-        .map(|(name, font)| (name, font.get_font_encoding()))
+        .map(|(name, font)| {
+            let encoding = font.get_font_encoding();
+            debug!("Font: {:?}, Encoding: {}", String::from_utf8_lossy(&name), encoding);
+            (name, encoding)
+        })
         .collect::<BTreeMap<Vec<u8>, &str>>();
 
     let vec = pdf_document.get_page_content(page_id)?;

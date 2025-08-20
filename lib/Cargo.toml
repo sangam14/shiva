@@ -78,7 +78,15 @@ web-sys ={ version = "0.3.4", features = [
 
 [dev-dependencies]
 env_logger = "0.10.0"
-log = "0.4.20"
+anyhow = "1.0.75"
+
+[[example]]
+name = "base64_image_example"
+required-features = ["json"]
+
+[[example]]
+name = "convert_image_to_base64"
+required-features = ["json"]
 
 [features]
 default = ["all"]
@@ -88,7 +96,7 @@ csv = ["dep:csv"]
 markdown = ["regex", "pulldown-cmark", "comrak"]
 html = ["scraper", "ego-tree"]
 pdf = ["lopdf", "typst", "ttf-parser", "comemo", "time", "typst-pdf", "ehttp"]
-json = ["serde", "serde_json", "base64"]
+json = ["serde", "serde_json", "base64", "regex"]
 xml = ["serde", "serde-xml-rs", "quick-xml"]
 rtf = ["rtf-parser", "image"]
 docx = ["docx-rs"]

@@ -576,21 +576,36 @@ where
         }
 
         Element::Image(image_data) => {
-            *image_num.borrow_mut() += 1;
-            let image_extension = image_data.image_type().to_extension();
-            let image_filename = format!("image{}{}", image_num.borrow(), image_extension);
-
-            (image_saver.function)(image_data.bytes(), &image_filename)?;
-
-            let image_node = arena.alloc(Node::new(RefCell::new(Ast::new(
-                NodeValue::Image(NodeLink {
-                    url: image_filename.clone(),
-                    title: image_data.title().to_string(),
-                }),
-                LineColumn { line: 0, column: 0 },
-            ))));
-
-            Ok(image_node)
+            // If the image_saver.function returns a special marker, embed as Base64
+            let result = (image_saver.function)(image_data.bytes(), "__base64__");
+            if let Ok(_) = result {
+                // Embed as Base64 markdown
+                let base64_md = image_data.to_base64_markdown();
+                let node = arena.alloc(Node::new(RefCell::new(Ast::new(
+                    NodeValue::Paragraph,
+                    LineColumn { line: 0, column: 0 },
+                ))));
+                let text_node = arena.alloc(Node::new(RefCell::new(Ast::new(
+                    NodeValue::Text(base64_md),
+                    LineColumn { line: 0, column: 0 },
+                ))));
+                node.append(text_node);
+                Ok(node)
+            } else {
+                // Default: save image and reference by filename
+                *image_num.borrow_mut() += 1;
+                let image_extension = image_data.image_type().to_extension();
+                let image_filename = format!("image{}{}", image_num.borrow(), image_extension);
+                (image_saver.function)(image_data.bytes(), &image_filename)?;
+                let image_node = arena.alloc(Node::new(RefCell::new(Ast::new(
+                    NodeValue::Image(NodeLink {
+                        url: image_filename.clone(),
+                        title: image_data.title().to_string(),
+                    }),
+                    LineColumn { line: 0, column: 0 },
+                ))));
+                Ok(image_node)
+            }
         }
 
         Element::Hyperlink {
@@ -905,4 +920,97 @@ blabla2 bla bla blabla bla bla blabla bla bla blabla bla bla bla"#;
 
         Ok(())
     }
+}
+
+/// Process markdown content and automatically convert image references to Base64 format
+/// 
+/// This function parses markdown content and converts all image references to
+/// embedded Base64 data, making the markdown self-contained.
+#[cfg(feature = "json")]
+pub fn process_markdown_with_base64_images(
+    content: &str,
+    base_path: Option<&str>,
+) -> anyhow::Result<String> {
+    use regex::Regex;
+    use std::path::Path;
+    
+    // Regex to find markdown image syntax: ![alt](path "title")
+    let image_re = Regex::new(r#"!\[([^\]]*)\]\(([^)]+?(?:\.(?:png|jpg|jpeg|gif|svg|bmp|webp)))(?:\s+["']([^"']*?)["'])?\)"#)?;
+    
+    let mut result = content.to_string();
+    let mut replacements = Vec::new();
+    
+    for capture in image_re.captures_iter(&result) {
+        let full_match = capture.get(0).unwrap().as_str();
+        let alt_text = capture.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let image_path = capture.get(2).unwrap().as_str();
+        let title = capture.get(3).map(|m| m.as_str().to_string());
+        
+        // Resolve relative paths
+        let resolved_path = if let Some(base) = base_path {
+            if Path::new(image_path).is_relative() {
+                format!("{}/{}", base, image_path)
+            } else {
+                image_path.to_string()
+            }
+        } else {
+            image_path.to_string()
+        };
+        
+        // Check if file exists
+        if std::path::Path::new(&resolved_path).exists() {
+            // Convert to Base64 markdown format
+            match crate::core::auto_convert_image_to_base64(
+                &resolved_path,
+                crate::core::ImageOutputFormat::Markdown,
+                title,
+                Some(alt_text),
+            ) {
+                Ok(converted) => {
+                    replacements.push((full_match.to_string(), converted));
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to convert image {}: {}", resolved_path, e);
+                }
+            }
+        }
+    }
+    
+    // Apply replacements
+    for (original, replacement) in replacements {
+        result = result.replace(&original, &replacement);
+    }
+    
+    Ok(result)
+}
+
+/// Process a markdown file and convert all image references to Base64 format
+/// 
+/// This function reads a markdown file, processes it to convert image references to Base64,
+/// and optionally writes the result to a new file.
+#[cfg(feature = "json")]
+pub fn process_markdown_file_with_base64_images(
+    input_path: &str,
+    output_path: Option<&str>,
+) -> anyhow::Result<String> {
+    use std::fs;
+    use std::path::Path;
+    
+    // Read the input file
+    let content = fs::read_to_string(input_path)?;
+    
+    // Get the directory of the input file for resolving relative image paths
+    let base_path = Path::new(input_path)
+        .parent()
+        .and_then(|p| p.to_str());
+    
+    // Process the content
+    let processed_content = process_markdown_with_base64_images(&content, base_path)?;
+    
+    // Write to output file if specified
+    if let Some(output) = output_path {
+        fs::write(output, &processed_content)?;
+    }
+    
+    Ok(processed_content)
 }

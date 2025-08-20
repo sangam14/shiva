@@ -290,3 +290,128 @@ Second header
         Ok(())
     }
 }
+
+/// Process text content and automatically convert image references to Base64 format
+/// 
+/// This function scans text for image file references and automatically converts them
+/// to embedded Base64 data URLs or markdown format.
+#[cfg(feature = "json")]
+pub fn process_text_with_base64_images(
+    content: &str,
+    base_path: Option<&str>,
+    output_format: crate::core::ImageOutputFormat,
+) -> anyhow::Result<String> {
+    use regex::Regex;
+    use std::path::Path;
+    
+    // Regex to find image references in text (common patterns)
+    let image_patterns = [
+        // File paths ending with image extensions
+        r"([^\s]+\.(png|jpg|jpeg|gif|svg|bmp|webp))",
+        // Markdown image syntax
+        r"!\[([^\]]*)\]\(([^)]+\.(png|jpg|jpeg|gif|svg|bmp|webp))\)",
+        // HTML img tags
+        r#"<img[^>]+src="([^"]+\.(png|jpg|jpeg|gif|svg|bmp|webp))"[^>]*>"#,
+    ];
+    
+    let mut result = content.to_string();
+    
+    for pattern_str in &image_patterns {
+        let re = Regex::new(pattern_str)?;
+        let mut replacements = Vec::new();
+        
+        for capture in re.captures_iter(&result) {
+            let full_match = capture.get(0).unwrap().as_str();
+            let image_path = if pattern_str.contains("!\\[") {
+                // Markdown format
+                capture.get(2).unwrap().as_str()
+            } else if pattern_str.contains("<img") {
+                // HTML format  
+                capture.get(1).unwrap().as_str()
+            } else {
+                // Plain file path
+                capture.get(1).unwrap().as_str()
+            };
+            
+            // Resolve relative paths
+            let resolved_path = if let Some(base) = base_path {
+                if Path::new(image_path).is_relative() {
+                    format!("{}/{}", base, image_path)
+                } else {
+                    image_path.to_string()
+                }
+            } else {
+                image_path.to_string()
+            };
+            
+            // Check if file exists
+            if std::path::Path::new(&resolved_path).exists() {
+                // Extract alt text and title if available
+                let (alt_text, title) = if pattern_str.contains("!\\[") {
+                    let alt = capture.get(1).map(|m| m.as_str().to_string());
+                    (alt, None)
+                } else {
+                    (None, None)
+                };
+                
+                // Convert to Base64 format
+                match crate::core::auto_convert_image_to_base64(
+                    &resolved_path,
+                    output_format.clone(),
+                    title,
+                    alt_text,
+                ) {
+                    Ok(converted) => {
+                        replacements.push((full_match.to_string(), converted));
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to convert image {}: {}", resolved_path, e);
+                    }
+                }
+            }
+        }
+        
+        // Apply replacements
+        for (original, replacement) in replacements {
+            result = result.replace(&original, &replacement);
+        }
+    }
+    
+    Ok(result)
+}
+
+/// Process a text file and convert all image references to Base64 format
+/// 
+/// This function reads a text file, processes it to convert image references to Base64,
+/// and optionally writes the result to a new file.
+#[cfg(feature = "json")]
+pub fn process_text_file_with_base64_images(
+    input_path: &str,
+    output_path: Option<&str>,
+    output_format: crate::core::ImageOutputFormat,
+) -> anyhow::Result<String> {
+    use std::fs;
+    use std::path::Path;
+    
+    // Read the input file
+    let content = fs::read_to_string(input_path)?;
+    
+    // Get the directory of the input file for resolving relative image paths
+    let base_path = Path::new(input_path)
+        .parent()
+        .and_then(|p| p.to_str());
+    
+    // Process the content
+    let processed_content = process_text_with_base64_images(
+        &content,
+        base_path,
+        output_format,
+    )?;
+    
+    // Write to output file if specified
+    if let Some(output) = output_path {
+        fs::write(output, &processed_content)?;
+    }
+    
+    Ok(processed_content)
+}

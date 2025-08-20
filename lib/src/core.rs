@@ -8,6 +8,9 @@ use strum::{Display, EnumCount, EnumString, IntoStaticStr, VariantArray};
 use thiserror::Error;
 use wasm_bindgen::prelude::wasm_bindgen;
 
+#[cfg(feature = "json")]
+use anyhow;
+
 #[cfg(feature = "csv")]
 use crate::csv;
 #[cfg(feature = "docx")]
@@ -318,6 +321,23 @@ impl Document {
         Ok(output)
     }
 
+    /// Generate output with a custom image saver (for markdown with Base64 images)
+    pub fn generate_with_saver<F>(&self, document_type: DocumentType, image_saver: F) -> anyhow::Result<Bytes>
+    where
+        F: Fn(&Bytes, &str) -> anyhow::Result<()> {
+        match document_type {
+            #[cfg(feature = "markdown")]
+            DocumentType::Markdown => {
+                crate::markdown::Transformer::generate_with_saver(self, image_saver)
+            }
+            #[cfg(feature = "html")]
+            DocumentType::HTML => {
+                crate::html::Transformer::generate_with_saver(self, image_saver)
+            }
+            _ => self.generate(document_type),
+        }
+    }
+
     /// Returns all elements from all bands
     pub fn get_all_elements(&self) -> Vec<&Element> {
         let mut elements = Vec::new();
@@ -613,6 +633,189 @@ impl ImageData {
         image_data
     }
 
+    /// Create an ImageData element from Base64 encoded image data
+    /// 
+    /// This method is useful for creating images from Base64-encoded data,
+    /// commonly used in web applications and APIs.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `base64_data` - Base64 encoded image bytes
+    /// * `title` - Title for the image
+    /// * `alt` - Alt text for the image
+    /// * `image_type` - File extension or image type (e.g., "png", "jpeg", "gif")
+    /// * `alignment` - Image alignment ("left", "center", "right", or empty for none)
+    /// * `size` - ImageDimension with optional width and height
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use shiva::core::{ImageData, ImageDimension};
+    /// 
+    /// let base64_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
+    /// let image = ImageData::from_base64(
+    ///     base64_png,
+    ///     "Small PNG".to_string(),
+    ///     "1x1 transparent PNG".to_string(),
+    ///     "png".to_string(),
+    ///     "center".to_string(),
+    ///     ImageDimension::default(),
+    /// ).unwrap();
+    /// 
+    /// assert_eq!(image.title(), "Small PNG");
+    /// assert_eq!(image.bytes().len(), 70);
+    /// ```
+    #[cfg(feature = "json")]
+    pub fn from_base64(
+        base64_data: &str,
+        title: String,
+        alt: String,
+        image_type: String,
+        alignment: String,
+        size: ImageDimension,
+    ) -> anyhow::Result<ImageData> {
+        use base64::{engine::general_purpose, Engine as _};
+        let bytes = Bytes::from(general_purpose::STANDARD.decode(base64_data)?);
+        Ok(ImageData::new(bytes, title, alt, image_type, alignment, size))
+    }
+
+    /// Convert ImageData to Base64 encoded string
+    /// 
+    /// This method encodes the image bytes to a Base64 string, useful for
+    /// serialization and web APIs.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use shiva::core::{ImageData, ImageDimension};
+    /// use bytes::Bytes;
+    /// 
+    /// let image_data = ImageData::new(
+    ///     Bytes::from("test".as_bytes()),
+    ///     "Test".to_string(),
+    ///     "Test".to_string(),
+    ///     "png".to_string(),
+    ///     "".to_string(),
+    ///     ImageDimension::default(),
+    /// );
+    /// 
+    /// let base64_string = image_data.to_base64();
+    /// assert_eq!(base64_string, "dGVzdA=="); // "test" in base64
+    /// ```
+    #[cfg(feature = "json")]
+    pub fn to_base64(&self) -> String {
+        use base64::{engine::general_purpose, Engine as _};
+        general_purpose::STANDARD.encode(&self.bytes)
+    }
+
+    /// Convert ImageData to a markdown image format with embedded Base64 data
+    /// 
+    /// This creates a markdown image with the Base64 data embedded as a data URL,
+    /// making it self-contained without requiring external image files.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use shiva::core::{ImageData, ImageDimension};
+    /// use bytes::Bytes;
+    /// 
+    /// let image_data = ImageData::new(
+    ///     Bytes::from("test".as_bytes()),
+    ///     "Sample Image".to_string(),
+    ///     "Alt text".to_string(),
+    ///     "png".to_string(),
+    ///     "".to_string(),
+    ///     ImageDimension::default(),
+    /// );
+    /// 
+    /// let markdown = image_data.to_base64_markdown();
+    /// assert!(markdown.contains("![Alt text](data:image/png;base64,"));
+    /// ```
+    #[cfg(feature = "json")]
+    pub fn to_base64_markdown(&self) -> String {
+        let base64_data = self.to_base64();
+        let mime_type = match self.image_type {
+            ImageType::Png => "image/png",
+            ImageType::Jpeg => "image/jpeg", 
+            ImageType::Gif => "image/gif",
+            ImageType::SVG => "image/svg+xml",
+        };
+        
+        format!(
+            "![{}](data:{};base64,{} \"{}\")",
+            self.alt,
+            mime_type,
+            base64_data,
+            self.title
+        )
+    }
+
+    /// Convert ImageData to HTML img tag with embedded Base64 data
+    /// 
+    /// This creates an HTML img element with the Base64 data embedded as a data URL.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use shiva::core::{ImageData, ImageDimension};
+    /// use bytes::Bytes;
+    /// 
+    /// let image_data = ImageData::new(
+    ///     Bytes::from("test".as_bytes()),
+    ///     "Sample Image".to_string(),
+    ///     "Alt text".to_string(),
+    ///     "png".to_string(),
+    ///     "center".to_string(),
+    ///     ImageDimension {
+    ///         width: Some("100px".to_string()),
+    ///         height: Some("50px".to_string()),
+    ///     },
+    /// );
+    /// 
+    /// let html = image_data.to_base64_html();
+    /// assert!(html.contains("<img"));
+    /// assert!(html.contains("data:image/png;base64,"));
+    /// ```
+    #[cfg(feature = "json")]
+    pub fn to_base64_html(&self) -> String {
+        let base64_data = self.to_base64();
+        let mime_type = match self.image_type {
+            ImageType::Png => "image/png",
+            ImageType::Jpeg => "image/jpeg",
+            ImageType::Gif => "image/gif", 
+            ImageType::SVG => "image/svg+xml",
+        };
+        
+        let data_url = format!("data:{};base64,{}", mime_type, base64_data);
+        
+        let align_attr = match self.align {
+            ImageAlignment::Left => " align=\"left\"",
+            ImageAlignment::Center => " align=\"center\"", 
+            ImageAlignment::Right => " align=\"right\"",
+            ImageAlignment::None => "",
+        };
+        
+        let width_attr = match &self.size.width {
+            Some(width) => format!(" width=\"{}\"", width),
+            None => String::new(),
+        };
+        
+        let height_attr = match &self.size.height {
+            Some(height) => format!(" height=\"{}\"", height),
+            None => String::new(),
+        };
+        
+        format!(
+            "<img src=\"{}\" alt=\"{}\" title=\"{}\"{}{}{}/>",
+            data_url,
+            self.alt,
+            self.title,
+            align_attr,
+            width_attr,
+            height_attr
+        )
+    }
+
     pub fn set_image_type(&mut self, image_type_str: &str) {
         let image_type_str = image_type_str
             .split('.')
@@ -743,6 +946,68 @@ pub fn disk_image_saver(path: &str) -> impl Fn(&Bytes, &str) -> anyhow::Result<(
         Ok(())
     };
     image_saver
+}
+
+/// Auto-convert images to Base64 format when processing documents
+/// 
+/// This function takes an image path and automatically loads it, converts to Base64,
+/// and returns the appropriate format (markdown or HTML) based on the target type.
+#[cfg(feature = "json")]
+pub fn auto_convert_image_to_base64(
+    image_path: &str,
+    format: ImageOutputFormat,
+    title: Option<String>,
+    alt: Option<String>,
+) -> anyhow::Result<String> {
+    use std::fs;
+    use std::path::Path;
+    
+    // Read the image file
+    let image_bytes = fs::read(image_path)?;
+    
+    // Extract file extension to determine image type
+    let path_obj = Path::new(image_path);
+    let extension = path_obj.extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("png")
+        .to_lowercase();
+    
+    // Extract filename for default title/alt if not provided
+    let filename = path_obj.file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("image")
+        .to_string();
+    
+    // Create ImageData
+    let image_data = ImageData::new(
+        Bytes::from(image_bytes),
+        title.unwrap_or_else(|| filename.clone()),
+        alt.unwrap_or_else(|| format!("Image: {}", filename)),
+        extension,
+        "".to_string(), // No alignment by default
+        ImageDimension::default(),
+    );
+    
+    // Convert to requested format
+    let result = match format {
+        ImageOutputFormat::Markdown => image_data.to_base64_markdown(),
+        ImageOutputFormat::Html => image_data.to_base64_html(),
+        ImageOutputFormat::Base64Only => image_data.to_base64(),
+    };
+    
+    Ok(result)
+}
+
+/// Output format options for image conversion
+#[cfg(feature = "json")]
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImageOutputFormat {
+    /// Convert to markdown format with embedded Base64
+    Markdown,
+    /// Convert to HTML format with embedded Base64
+    Html,
+    /// Return only the Base64 string
+    Base64Only,
 }
 
 // Opinion (JohnScience): The variants of this enum should be enabled/disabled based on the features.
@@ -942,6 +1207,37 @@ pub mod tests {
             ImageAlignment::Right,
             ImageAlignment::from_str("right").unwrap()
         );
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_image_base64() {
+        // Test data: "Hello, World!" encoded in base64
+        let base64_data = "SGVsbG8sIFdvcmxkIQ==";
+        let expected_bytes = "Hello, World!".as_bytes();
+
+        // Create ImageData from base64
+        let image = ImageData::from_base64(
+            base64_data,
+            "Test Title".to_string(),
+            "Test Alt".to_string(),
+            "png".to_string(),
+            "center".to_string(),
+            ImageDimension {
+                width: Some("100px".to_string()),
+                height: Some("100px".to_string()),
+            },
+        ).unwrap();
+
+        // Verify the bytes were decoded correctly
+        assert_eq!(image.bytes().as_ref(), expected_bytes);
+        assert_eq!(image.title(), "Test Title");
+        assert_eq!(image.alt(), "Test Alt");
+        assert_eq!(image.image_type(), &ImageType::Png);
+
+        // Test round-trip: encode back to base64
+        let encoded = image.to_base64();
+        assert_eq!(encoded, base64_data);
     }
 }
 
